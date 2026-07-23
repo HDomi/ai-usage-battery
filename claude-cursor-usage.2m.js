@@ -1,29 +1,28 @@
-#!/usr/bin/env bun
-// <xbar.title>Claude & Codex Usage</xbar.title>
-// <xbar.version>v3.0</xbar.version>
+#!/usr/bin/env node
+// <xbar.title>Claude & Cursor Usage</xbar.title>
+// <xbar.version>v4.0</xbar.version>
 // <xbar.author>개발부스러기</xbar.author>
-// <xbar.desc>Claude Code 5시간 블록 + Codex rate limit을 메뉴바에 배터리 아이콘으로 상시 표시</xbar.desc>
-// SwiftBar 플러그인: 1분마다 갱신. 메뉴바=배터리 잔량 아이콘(자체 PNG), 클릭=상세 게이지.
+// <xbar.desc>Claude Code 5시간 블록 + Cursor 사용량을 메뉴바에 배터리 아이콘으로 상시 표시</xbar.desc>
+// SwiftBar 플러그인: 2분마다 갱신. 메뉴바=배터리 잔량 아이콘(자체 PNG), 클릭=상세 게이지.
 
 import { execSync, spawn } from "node:child_process";
 import {
   readFileSync,
   writeFileSync,
-  readdirSync,
   statSync,
   existsSync,
   mkdirSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { dirname } from "node:path";
 import { homedir } from "node:os";
 import zlib from "node:zlib";
 
 const HOME = homedir();
-// 바이너리 경로 자동 탐지 (환경별로 다름 — 이식성)
 function findBin(name, extra = []) {
   const cands = [
     ...extra,
     `${HOME}/.bun/bin/${name}`,
+    `${HOME}/.nvm/versions/node/current/bin/${name}`,
     "/opt/homebrew/bin/" + name,
     "/usr/local/bin/" + name,
   ];
@@ -38,19 +37,18 @@ function findBin(name, extra = []) {
     }).trim();
     if (p) return p;
   } catch {}
-  return name; // 최후: PATH에 의존
+  return name;
 }
 const CCUSAGE = findBin("ccusage");
-const CODEX_BIN = findBin("codex");
-const CODEX_SESSIONS = `${HOME}/.codex/sessions`;
 const now = Math.floor(Date.now() / 1000);
 
-// ── 자동 업데이트 (알림 + 원클릭) ──
-const VERSION = "1.3.1";
+// ── 자동 업데이트 ──
+const VERSION = "2.0.0";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
-  "https://raw.githubusercontent.com/dennykim123/claude-codex-battery/main";
+  "https://raw.githubusercontent.com/HDomi/ai-usage-battery/main";
 const UPDATE_CACHE = `${HOME}/.claude/swiftbar/.update-check.json`;
+
 function cmpVer(a, b) {
   const pa = String(a).split(".").map(Number);
   const pb = String(b).split(".").map(Number);
@@ -60,8 +58,7 @@ function cmpVer(a, b) {
   }
   return 0;
 }
-// 캐시된 최신 버전을 읽고, 24h+ 지났으면 백그라운드로 GitHub VERSION만 조용히 확인
-// (렌더를 막지 않음 — codex 자동갱신과 동일한 spawn+unref 패턴)
+
 function getUpdateInfo() {
   let cache = null;
   try {
@@ -151,7 +148,8 @@ const _rect = (cv, x, y, rw, rh, col) => {
   for (let j = 0; j < rh; j++)
     for (let i = 0; i < rw; i++) cv.set(x + i, y + j, col);
 };
-const _stroke = (cv, x, y, rw, rh, col) => {
+
+const _roundedCapsuleBorder = (cv, x, y, rw, rh, col) => {
   for (let i = 1; i < rw - 1; i++) {
     cv.set(x + i, y, col);
     cv.set(x + i, y + rh - 1, col);
@@ -160,15 +158,22 @@ const _stroke = (cv, x, y, rw, rh, col) => {
     cv.set(x, y + j, col);
     cv.set(x + rw - 1, y + j, col);
   }
+  cv.set(x, y, [0, 0, 0, 0]);
+  cv.set(x + rw - 1, y, [0, 0, 0, 0]);
+  cv.set(x, y + rh - 1, [0, 0, 0, 0]);
+  cv.set(x + rw - 1, y + rh - 1, [0, 0, 0, 0]);
+  cv.set(x + 1, y + 1, col);
+  cv.set(x + rw - 2, y + 1, col);
+  cv.set(x + 1, y + rh - 2, col);
+  cv.set(x + rw - 2, y + rh - 2, col);
 };
-// ── 크기 프리셋: big(기본) / small — 드롭다운 ↕ 행 또는 ~/.claude/swiftbar/.batt-size 로 전환 ──
+
 const SIZE_FILE = `${HOME}/.claude/swiftbar/.batt-size`;
 let SIZE = "big";
 try {
   if (readFileSync(SIZE_FILE, "utf8").trim() === "small") SIZE = "small";
 } catch {}
 
-// 4x6 픽셀 폰트 (big 프리셋)
 const FONT46 = {
   0: ["0110", "1001", "1001", "1001", "1001", "0110"],
   1: ["0010", "0110", "0010", "0010", "0010", "0111"],
@@ -181,9 +186,10 @@ const FONT46 = {
   8: ["0110", "1001", "0110", "1001", "1001", "0110"],
   9: ["0110", "1001", "1001", "0111", "0001", "0110"],
   C: ["0110", "1001", "1000", "1000", "1001", "0110"],
-  X: ["1001", "1001", "0110", "0110", "1001", "1001"],
+  R: ["1110", "1001", "1110", "1010", "1001", "1001"],
+  r: ["0000", "1011", "1100", "1000", "1000", "1000"],
 };
-// 3x5 클래식 픽셀 폰트 (small 프리셋)
+
 const FONT35 = {
   0: ["111", "101", "101", "101", "111"],
   1: ["010", "110", "010", "010", "111"],
@@ -196,17 +202,17 @@ const FONT35 = {
   8: ["111", "101", "111", "101", "111"],
   9: ["111", "101", "111", "001", "111"],
   C: ["111", "100", "100", "100", "111"],
-  X: ["101", "101", "010", "101", "101"],
+  R: ["110", "101", "110", "101", "101"],
+  r: ["000", "111", "100", "100", "100"],
 };
-// 프리셋별 지오메트리: font/자간, 캡슐(bw×bh), 배치(capw·간격), 캔버스 높이, 숫자 y오프셋
+
 const PRESET =
   SIZE === "small"
-    ? { font: FONT35, adv: () => 4, bw: 14, bh: 9, capw: 16, gap: 3, ggap: 7, pad: 1, lblgap: 2, H: 9, dy: 2 }
-    : { font: FONT46, adv: (ch) => (ch === "1" ? 4 : 5), bw: 18, bh: 10, capw: 20, gap: 5, ggap: 10, pad: 2, lblgap: 3, H: 12, dy: 3 };
+    ? { font: FONT35, adv: () => 4, bw: 15, bh: 9, capw: 17, gap: 3, ggap: 7, pad: 1, lblgap: 2, H: 9, dy: 2 }
+    : { font: FONT46, adv: (ch) => (ch === "1" ? 4 : 5), bw: 19, bh: 10, capw: 21, gap: 5, ggap: 10, pad: 2, lblgap: 3, H: 12, dy: 3 };
 const NUM = PRESET.font;
-// altCol/boundaryX 지정 시: 픽셀 x가 채움 경계(boundaryX) 왼쪽이면 altCol(밝은 채움 위 대비),
-// 오른쪽(빈 배경)이면 col. 지정 없으면 col 단색(그룹 라벨용).
-const chAdv = PRESET.adv; // big: 5px('1'만 4px 커닝 — "100" 물림 방지), small: 4px
+
+const chAdv = PRESET.adv;
 function drawNum(cv, x, y, str, col, altCol, boundaryX) {
   let cx = x;
   for (const ch of str) {
@@ -223,21 +229,32 @@ function drawNum(cv, x, y, str, col, altCol, boundaryX) {
   return cx;
 }
 const numW = (s) => [...s].reduce((w, ch) => w + chAdv(ch), 0) - 1;
-// 실제 macOS 배터리 인디케이터 색 (Apple HIG system colors, 다크/라이트 각각)
+
 function heatRemain(r, dark) {
-  if (r <= 20) return dark ? [255, 69, 58] : [255, 59, 48]; // systemRed
-  if (r < 50) return dark ? [255, 214, 10] : [255, 204, 0]; // systemYellow
-  return dark ? [48, 209, 88] : [52, 199, 89]; // systemGreen
+  if (r <= 20) return dark ? [255, 69, 58] : [255, 59, 48];
+  if (r < 50) return dark ? [255, 214, 10] : [255, 204, 0];
+  return dark ? [48, 209, 88] : [52, 199, 89];
 }
 const heatRemainHex = (r) =>
-  r <= 20 ? "#FF453A" : r < 50 ? "#FFD60A" : "#30D158"; // 드롭다운 게이지 (다크 기준)
-// 캡슐 하나: 테두리 + 잔량 채움 + 안에 잔량 숫자(100 포함, 항상 표시)
+  r <= 20 ? "#FF453A" : r < 50 ? "#FFD60A" : "#30D158";
+
+function drawNumWithOutline(cv, x, y, str, col, outlineCol) {
+  if (outlineCol) {
+    // 50% 은은한 1px 드롭 섀도로 변경 (굵고 진한 테두리 대신 자연스러운 그늘)
+    drawNum(cv, x + 1, y + 1, str, outlineCol);
+  }
+  return drawNum(cv, x, y, str, col);
+}
+
 function drawCapsule(cv, x, midY, remain, ink, dark) {
   const bw = PRESET.bw,
     bh = PRESET.bh,
     by = midY - Math.floor(bh / 2);
-  _stroke(cv, x, by, bw, bh, ink);
-  _rect(cv, x + bw, by + 3, 2, bh - 6, ink); // 단자
+  
+  // 은은한 50% 옅은 그림자 효과
+  _roundedCapsuleBorder(cv, x + 1, by + 1, bw, bh, [0, 0, 0, 60]);
+  _roundedCapsuleBorder(cv, x, by, bw, bh, ink);
+  _rect(cv, x + bw, by + 3, 2, bh - 6, ink);
   if (remain != null) {
     const innerW = bw - 4;
     const v = Math.max(0, Math.min(100, remain));
@@ -245,14 +262,15 @@ function drawCapsule(cv, x, midY, remain, ink, dark) {
     if (fw > 0) _rect(cv, x + 2, by + 2, fw, bh - 4, heatRemain(remain, dark));
     const s = String(Math.round(v));
     const tx = x + Math.floor((bw - numW(s)) / 2);
-    // 채움(밝은 system color) 위 픽셀은 어두운 숫자, 빈 배경 위는 ink → 어디서나 대비 확보
-    drawNum(cv, tx, midY - PRESET.dy, s, ink, [30, 30, 30], x + 2 + (fw > 0 ? fw : 0));
+    drawNum(cv, tx, midY - PRESET.dy, s, ink, [20, 20, 20], x + 2 + (fw > 0 ? fw : 0));
   }
   return x + bw + 2;
 }
-// 캡슐 N개(items=[{label,remain}]). 그룹(C=Claude / X=Codex) 앞에 라벨 문자.
+
 function renderBatteryImage(dark, items) {
-  const ink = dark ? [235, 235, 235] : [45, 45, 45];
+  const ink = dark ? [255, 255, 255, 255] : [0, 0, 0, 255];
+  // 50% 옅게 조정된 소프트 그림자 색상
+  const outlineCol = dark ? [0, 0, 0, 90] : [0, 0, 0, 50];
   const CAPW = PRESET.capw,
     GAP = PRESET.gap,
     GGAP = PRESET.ggap,
@@ -260,11 +278,11 @@ function renderBatteryImage(dark, items) {
     LBLGAP = PRESET.lblgap;
   const H = PRESET.H;
   const midY = Math.floor(H / 2);
-  // 폭 계산 (그룹 라벨 포함)
+  const getGroup = (lbl) => (lbl.startsWith("Cr") ? "Cr" : lbl[0]);
   let W = PAD * 2;
   let pg = null;
   for (let i = 0; i < items.length; i++) {
-    const g = items[i].label[0];
+    const g = getGroup(items[i].label);
     if (g !== pg) {
       if (pg !== null) W += GGAP;
       W += numW(g) + LBLGAP;
@@ -276,10 +294,11 @@ function renderBatteryImage(dark, items) {
   let x = PAD;
   pg = null;
   for (let i = 0; i < items.length; i++) {
-    const g = items[i].label[0];
+    const g = getGroup(items[i].label);
     if (g !== pg) {
       if (pg !== null) x += GGAP;
-      drawNum(cv, x, midY - PRESET.dy, g, ink); // 그룹 라벨 C 또는 X
+      // 라벨 외곽선 렌더링으로 텍스트 시인성 보장
+      drawNumWithOutline(cv, x, midY - PRESET.dy, g, ink, outlineCol);
       x += numW(g) + LBLGAP;
       pg = g;
     } else x += GAP;
@@ -288,7 +307,11 @@ function renderBatteryImage(dark, items) {
   }
   return encodePNG(cv.w, cv.h, cv.buf).toString("base64");
 }
+
 function isDarkMode() {
+  if (process.env.OS_APPEARANCE) {
+    return process.env.OS_APPEARANCE.toLowerCase().includes("dark");
+  }
   try {
     return (
       execSync("defaults read -g AppleInterfaceStyle 2>/dev/null", {
@@ -301,7 +324,7 @@ function isDarkMode() {
   }
 }
 
-// ── 게이지 렌더 (부분 블록, 의존성 0) ──────────────────────
+// ── 게이지 렌더 ──
 const FULL = "█",
   EMPTY = "░",
   PART = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
@@ -324,14 +347,7 @@ function bar(pct, w) {
   s += EMPTY.repeat(Math.max(0, w - used));
   return s;
 }
-// 사용률 → 색 (GitHub 신호색)
-function heat(pct) {
-  if (pct >= 80) return "#f85149"; // 빨강
-  if (pct >= 50) return "#d29922"; // 노랑
-  return "#3fb950"; // 초록
-}
 
-// ── 공용 유틸 ──────────────────────────────────────────────
 const fmtDur = (secs) => {
   if (secs <= 0) return "0m";
   const h = Math.floor(secs / 3600);
@@ -346,7 +362,7 @@ const fmtTok = (n) => {
   return `${n}`;
 };
 
-// ── 1. Claude Code: 활성 5시간 블록 ────────────────────────
+// ── 1. Claude Code ────────────────────────
 function getClaude() {
   try {
     const raw = execSync(`${CCUSAGE} blocks --active --json`, {
@@ -380,7 +396,6 @@ function getClaude() {
   }
 }
 
-// ── 1b. Claude 오늘 모델별 사용 (Opus/Sonnet/Fable/Haiku) ──
 const MODEL_NAMES = {
   "claude-fable-5": "Fable 5",
   "claude-opus-4-8": "Opus 4.8",
@@ -419,10 +434,6 @@ function getClaudeModels() {
   }
 }
 
-// ── 1c. Claude 실제 rate limit — Anthropic OAuth usage API 직접 조회 ──
-// 이 맥의 Claude Code 로그인 토큰(키체인)으로 /usage와 같은 데이터를 서버에서 직접
-// 가져온다. 수치는 계정 단위 합산이라 다른 디바이스·데스크톱앱·웹 사용분도 포함.
-// 실패 시 폴백: 자체 캐시(마지막 성공 응답) → 레거시 usage-cache.json 파일.
 const CLAUDE_STATE_DIR = `${HOME}/.claude/swiftbar`;
 const CLAUDE_USAGE_CACHE = `${CLAUDE_STATE_DIR}/.claude-usage.json`;
 const LEGACY_USAGE_FILES = [
@@ -430,10 +441,7 @@ const LEGACY_USAGE_FILES = [
   `${HOME}/.claude/PAI/MEMORY/STATE/usage-cache.json`,
 ];
 
-// 토큰은 반환값으로만 존재 — 파일·로그·프로세스 인자 어디에도 남기지 않는다
 function readClaudeToken() {
-  // 옵트아웃: 키체인 접근/라이브 조회를 원치 않으면 `touch ~/.claude/swiftbar/.no-live`
-  // — 키체인 프롬프트에서 '거부'를 누르면 2분마다 다시 뜨므로, 그 대신 이 스위치를 쓴다.
   if (existsSync(`${CLAUDE_STATE_DIR}/.no-live`)) return null;
   try {
     const raw = execSync(
@@ -444,7 +452,6 @@ function readClaudeToken() {
     if (t) return t;
   } catch {}
   try {
-    // 키체인이 없는 환경(예: 수동 이전) 대비 — Claude Code의 파일 자격증명
     const raw = readFileSync(`${HOME}/.claude/.credentials.json`, "utf8");
     return JSON.parse(raw)?.claudeAiOauth?.accessToken ?? null;
   } catch {}
@@ -455,7 +462,6 @@ function fetchClaudeUsageLive() {
   const token = readClaudeToken();
   if (!token) return null;
   try {
-    // Authorization 헤더는 stdin(-H @-)으로 전달 — ps 프로세스 목록에 토큰 노출 방지
     const raw = execSync(
       `/usr/bin/curl -fsS --max-time 5 -H @- -H "anthropic-beta: oauth-2025-04-20" https://api.anthropic.com/api/oauth/usage`,
       {
@@ -500,7 +506,6 @@ function readClaudeUsageFallback() {
   return null;
 }
 
-// 5시간 세션 / 주간 전체 / Fable 주간(weekly_scoped) 사용률
 function getClaudeUsage() {
   const src = fetchClaudeUsageLive() ?? readClaudeUsageFallback();
   if (!src) return null;
@@ -509,7 +514,6 @@ function getClaudeUsage() {
     const toTs = (iso) => (iso ? Math.floor(Date.parse(iso) / 1000) : null);
     const win = (o) =>
       o ? { pct: o.utilization ?? 0, resetsAt: toTs(o.resets_at) } : null;
-    // Fable(또는 최상위 모델) 주간 scoped 한도
     let fable = null;
     for (const l of d.limits || []) {
       const mdl = l.scope?.model?.display_name;
@@ -534,119 +538,76 @@ function getClaudeUsage() {
   }
 }
 
-// ── 2. Codex: 가장 신선한 rate_limits ──────────────────────
-function walkJsonl(dir, out) {
-  let entries;
+// ── 2. Cursor AI 사용량 ─────────────────────────────
+const CURSOR_USAGE_CACHE = `${CLAUDE_STATE_DIR}/.cursor-usage.json`;
+
+function fetchCursorUsageLive() {
   try {
-    entries = readdirSync(dir, { withFileTypes: true });
+    const dbPath = `${HOME}/Library/Application Support/Cursor/User/globalStorage/state.vscdb`;
+    if (!existsSync(dbPath)) return null;
+
+    const token = execSync(
+      `/usr/bin/sqlite3 "${dbPath}" "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken';"`
+    , { encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+
+    if (!token) return null;
+
+    const raw = execSync(
+      `/usr/bin/curl -sL -X POST -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -H "Connect-Protocol-Version: 1" -d "{}" https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage`
+    , { encoding: "utf8", timeout: 8000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+
+    const d = JSON.parse(raw);
+    if (!d?.planUsage) return null;
+
+    const usedPct = Number(d.planUsage.totalPercentUsed ?? d.planUsage.autoPercentUsed ?? 0);
+    const remainPct = Math.max(0, 100 - usedPct);
+
+    const res = {
+      usedPct: usedPct,
+      remainPct: remainPct,
+      cycleEnd: d.billingCycleEnd ? Math.floor(Number(d.billingCycleEnd) / 1000) : null,
+      displayMsg: d.autoModelSelectedDisplayMessage || d.displayMessage || null,
+      measuredAt: Math.floor(Date.now() / 1000),
+      live: true
+    };
+
+    try {
+      mkdirSync(CLAUDE_STATE_DIR, { recursive: true });
+      writeFileSync(CURSOR_USAGE_CACHE, JSON.stringify(res));
+    } catch {}
+
+    return res;
   } catch {
-    return;
-  }
-  for (const ent of entries) {
-    const p = join(dir, ent.name);
-    if (ent.isDirectory()) walkJsonl(p, out);
-    else if (ent.name.endsWith(".jsonl")) {
-      try {
-        out.push({ path: p, mtime: statSync(p).mtimeMs });
-      } catch {}
-    }
+    return null;
   }
 }
-function getCodex() {
-  if (!existsSync(CODEX_SESSIONS)) return null;
-  const files = [];
-  walkJsonl(CODEX_SESSIONS, files);
-  files.sort((a, b) => b.mtime - a.mtime);
-  for (const f of files.slice(0, 8)) {
-    try {
-      const lines = readFileSync(f.path, "utf8").trim().split("\n");
-      for (let i = lines.length - 1; i >= 0; i--) {
-        if (!lines[i].includes("rate_limits")) continue;
-        let obj;
-        try {
-          obj = JSON.parse(lines[i]);
-        } catch {
-          continue;
-        }
-        const rl = obj.payload?.rate_limits ?? obj.rate_limits;
-        // prolite=primary/secondary(%), premium=credits(잔액) — 둘 중 하나라도 있으면 유효
-        if (rl && (rl.primary || rl.secondary || rl.credits)) {
-          return {
-            measuredAt: Math.floor(f.mtime / 1000),
-            limitId: rl.limit_id || null,
-            plan: rl.plan_type || null,
-            primary: rl.primary || null,
-            secondary: rl.secondary || null,
-            credits: rl.credits || null,
-          };
-        }
-      }
-    } catch {}
-  }
+
+function readCursorUsageFallback() {
+  try {
+    const c = JSON.parse(readFileSync(CURSOR_USAGE_CACHE, "utf8"));
+    if (c && c.remainPct != null) {
+      return { ...c, live: false };
+    }
+  } catch {}
   return null;
 }
-function windowState(w) {
-  if (!w) return null;
-  const stale = w.resets_at && w.resets_at < now;
-  return {
-    pct: stale ? 0 : (w.used_percent ?? 0),
-    resetsIn: w.resets_at ? w.resets_at - now : null,
-    stale,
-  };
-}
-// 소진 + 오래됨일 때만 하루 최대 몇 회 Codex를 백그라운드로 굴려 리셋 감지 (throttle 6h)
-function maybeAutoRefreshCodex(codex) {
-  try {
-    if (!codex) return;
-    // 소진 판정: credits 소진 OR 어떤 창이든 100% 사용
-    let exhausted = false;
-    if (codex.credits) {
-      const cr = codex.credits;
-      exhausted = !cr.unlimited && (!cr.has_credits || Number(cr.balance) <= 0);
-    } else {
-      const p = windowState(codex.primary),
-        s = windowState(codex.secondary);
-      exhausted = Boolean((p && p.pct >= 100) || (s && s.pct >= 100));
-    }
-    if (!exhausted) return;
-    if (now - codex.measuredAt < 2 * 3600) return; // 2h+ 오래됐을 때만
-    const tsFile = `${HOME}/.claude/swiftbar/.codex-refresh-ts`;
-    let last = 0;
-    try {
-      last = parseInt(readFileSync(tsFile, "utf8").trim(), 10) || 0;
-    } catch {}
-    if (now - last < 6 * 3600) return; // throttle: 6h 간격 (하루 최대 4회)
-    writeFileSync(tsFile, String(now));
-    // detached 백그라운드 실행 — 위젯을 막지 않음. 완료되면 세션 로그 갱신됨.
-    const child = spawn(
-      "/bin/sh",
-      [
-        "-c",
-        `echo "reply ok" | "${CODEX_BIN}" exec --sandbox read-only --skip-git-repo-check - >/dev/null 2>&1`,
-      ],
-      { detached: true, stdio: "ignore", cwd: HOME },
-    );
-    child.unref();
-  } catch {}
+
+function getCursorUsage() {
+  return fetchCursorUsageLive() ?? readCursorUsageFallback();
 }
 
 // ── 렌더링 ─────────────────────────────────────────────────
 const claude = getClaude();
 const cusage = getClaudeUsage();
 const cmodels = getClaudeModels();
-const codex = getCodex();
-maybeAutoRefreshCodex(codex); // 소진+오래됨 시 백그라운드 갱신 (throttle)
-const out = [];
+const cursorUsage = getCursorUsage();
 
-// 메뉴바: 배터리 잔량 아이콘 (전부 "남은 %")
-//   Claude(usage-cache): C5=5시간세션 · CW=주간전체 · CF=Fable 주간
-//   Codex(rate_limits) : X5=5시간 · XW=주간
+const out = [];
 const rem = (pct) => (pct == null ? null : Math.max(0, 100 - pct));
-// 한쪽만 쓰는 사용자 대응: 데이터가 있는 서비스만 표시
 const hasClaude = !!cusage || !!(claude && !claude.error);
-const hasCodex = !!codex;
+const hasCursor = !!cursorUsage;
+
 const battItems = [];
-// Claude — usage-cache 있으면 3종, 없어도 ccusage 블록이 있으면 C5만. 둘 다 없으면 Claude 배터리 생략.
 if (cusage) {
   battItems.push({ label: "C5", remain: rem(cusage.fiveHour?.pct) });
   battItems.push({ label: "CW", remain: rem(cusage.weekly?.pct) });
@@ -655,38 +616,21 @@ if (cusage) {
 } else if (claude && !claude.error) {
   battItems.push({ label: "C5", remain: Math.max(0, 100 - claude.elapsedPct) });
 }
-// Codex — 세션 데이터 있을 때만. Codex 안 쓰는 사람에겐 X 배터리 자체를 안 그림.
-if (codex && (codex.primary || codex.secondary)) {
-  // prolite: 5시간·주간 % 창
-  const p = windowState(codex.primary);
-  const s = windowState(codex.secondary);
-  battItems.push({ label: "X5", remain: p ? Math.max(0, 100 - p.pct) : null });
-  battItems.push({ label: "XW", remain: s ? Math.max(0, 100 - s.pct) : null });
-} else if (codex && codex.credits) {
-  // premium: 크레딧 잔액 (총량 미제공 → 있음=100 / 소진=0 / 무제한=100)
-  const cr = codex.credits;
-  const remain = cr.unlimited
-    ? 100
-    : cr.has_credits && Number(cr.balance) > 0
-      ? 100
-      : 0;
-  battItems.push({ label: "X", remain });
+
+if (cursorUsage) {
+  battItems.push({ label: "Cr", remain: Math.round(cursorUsage.remainPct) });
 }
-// 잔량 숫자가 캡슐 안에 들어감 → 메뉴바는 이미지만. 라벨은 드롭다운 범례.
-// 둘 다 없으면(신규/양쪽 미사용) 배터리 대신 안내 아이콘.
+
 if (battItems.length) {
   out.push(`| image=${renderBatteryImage(isDarkMode(), battItems)}`);
 } else {
   out.push("🔋 —");
 }
 out.push("---");
-const codexLegend =
-  codex?.credits && !codex.primary && !codex.secondary
-    ? "X = Codex 크레딧"
-    : "X5·XW = Codex 5시간·주간";
+
 const legendParts = [];
-if (hasClaude) legendParts.push("C5·CW·CF = Claude 5시간·주간·Fable");
-if (hasCodex) legendParts.push(codexLegend);
+if (hasClaude) legendParts.push("C5·CW·CF = Claude");
+if (hasCursor) legendParts.push("Cr = Cursor");
 if (legendParts.length) {
   out.push(
     `🔋 남은 %  ·  ${legendParts.join("  ·  ")} | size=11 color=#8b949e`,
@@ -694,7 +638,7 @@ if (legendParts.length) {
   out.push("---");
 }
 
-// Claude 상세 — hasClaude일 때만 (Claude Code 안 쓰면 섹션 자체 생략)
+// Claude 상세
 if (hasClaude) {
   out.push("Claude Code | size=13 color=#8b949e");
   if (cusage) {
@@ -715,8 +659,8 @@ if (hasClaude) {
     if (cusage.fable) winRow(`${cusage.fable.model} 남음`, cusage.fable);
     out.push(
       cusage.live
-        ? `라이브 (Anthropic usage API — 전 디바이스 합산) | size=11 color=#8b949e`
-        : `측정 ${fmtDur(now - cusage.measuredAt)} 전 (캐시 폴백 — Claude Code 로그인·네트워크 확인) | size=11 color=#d29922`,
+        ? `라이브 (Anthropic usage API) | size=11 color=#8b949e`
+        : `측정 ${fmtDur(now - cusage.measuredAt)} 전 (캐시 폴백) | size=11 color=#d29922`,
     );
   }
   if (claude && !claude.error) {
@@ -724,7 +668,6 @@ if (hasClaude) {
       `블록 비용  $${claude.cost.toFixed(2)}  ·  ${fmtTok(claude.tokens)} 토큰  ·  $${claude.costPerHour?.toFixed(1) ?? "?"}/h | font=Menlo size=11 color=#8b949e`,
     );
   }
-  // 오늘 모델별 사용 (최대 모델 대비 막대)
   if (cmodels && cmodels.models.length) {
     out.push(
       `오늘 모델별  ·  합 $${cmodels.total.toFixed(0)} | size=11 color=#8b949e`,
@@ -741,68 +684,39 @@ if (hasClaude) {
   out.push("---");
 }
 
-// Codex 상세 — hasCodex일 때만 (Codex 안 쓰면 섹션 자체 생략)
-if (hasCodex) {
+// Cursor 상세
+if (hasCursor) {
+  out.push("Cursor AI | size=13 color=#8b949e");
+  const r = Math.round(cursorUsage.remainPct);
+  const u = Math.round(cursorUsage.usedPct);
+  const resetStr = cursorUsage.cycleEnd
+    ? cursorUsage.cycleEnd < now
+      ? "리셋됨"
+      : `리셋 ${fmtDur(cursorUsage.cycleEnd - now)}`
+    : "";
   out.push(
-    `Codex${codex?.plan ? " · " + codex.plan : codex?.limitId ? " · " + codex.limitId : ""} | size=13 color=#8b949e`,
+    `월간 남음  ▕${bar(r, 20)}▏ ${r}%  (사용 ${u}%)${resetStr ? "  ·  " + resetStr : ""} | font=Menlo color=${heatRemainHex(r)}`,
   );
-  const p = windowState(codex.primary);
-  const s = windowState(codex.secondary);
-  // premium: primary/secondary 없이 크레딧 잔액만
-  if (!p && !s && codex.credits) {
-    const cr = codex.credits;
-    if (cr.unlimited) {
-      out.push("크레딧  무제한 | font=Menlo color=#3fb950");
-    } else if (!cr.has_credits || Number(cr.balance) <= 0) {
-      out.push("크레딧  소진 · 한도 초과 (0) | font=Menlo color=#f85149");
-      out.push(
-        "      Codex 설정에서 크레딧 구매 또는 리셋 대기 | font=Menlo size=11 color=#8b949e",
-      );
-    } else {
-      out.push(`크레딧  잔액 ${cr.balance} | font=Menlo color=#3fb950`);
-    }
-  }
-  if (p) {
-    const reset = p.stale
-      ? "리셋됨"
-      : p.resetsIn != null
-        ? `리셋 ${fmtDur(p.resetsIn)}`
-        : "";
-    const pr = Math.max(0, 100 - p.pct);
+  if (cursorUsage.displayMsg) {
     out.push(
-      `5시간 남음 ▕${bar(pr, 20)}▏ ${Math.round(pr)}%  (사용 ${Math.round(p.pct)}%) | font=Menlo color=${heatRemainHex(pr)}`,
+      `      ${cursorUsage.displayMsg} | font=Menlo size=11 color=#8b949e`,
     );
-    out.push(`      ${reset} | font=Menlo size=11 color=#8b949e`);
   }
-  if (s) {
-    const reset = s.stale
-      ? "리셋됨"
-      : s.resetsIn != null
-        ? `리셋 ${fmtDur(s.resetsIn)}`
-        : "";
-    const sr = Math.max(0, 100 - s.pct);
-    out.push(
-      `주간 남음  ▕${bar(sr, 20)}▏ ${Math.round(sr)}%  (사용 ${Math.round(s.pct)}%) | font=Menlo color=${heatRemainHex(sr)}`,
-    );
-    out.push(`      ${reset} | font=Menlo size=11 color=#8b949e`);
-  }
-  const age = now - codex.measuredAt;
-  const staleWarn = age > 3 * 3600; // 3시간+ 오래됨 → 리셋됐을 수 있음
   out.push(
-    `측정 ${fmtDur(age)} 전${staleWarn ? "  ·  ⚠ 리셋됐을 수 있음, Codex 쓰면 갱신" : " (Codex 세션 기준)"} | size=11 color=${staleWarn ? "#d29922" : "#8b949e"}`,
+    cursorUsage.live
+      ? `라이브 (Cursor API) | size=11 color=#8b949e`
+      : `측정 ${fmtDur(now - cursorUsage.measuredAt)} 전 (캐시 폴백) | size=11 color=#d29922`,
   );
   out.push("---");
 }
 
-// 둘 다 없으면(신규/양쪽 미사용) 안내
-if (!hasClaude && !hasCodex) {
+if (!hasClaude && !hasCursor) {
   out.push(
-    "Claude Code나 Codex를 실행하면 사용량이 표시됩니다 | size=12 color=gray",
+    "Claude Code나 Cursor를 로그인하여 실행하면 사용량이 표시됩니다 | size=12 color=gray",
   );
   out.push("---");
 }
 
-// 새 버전이 있으면 강조 원클릭 업데이트, 없어도 수동 업데이트 행은 항상 노출
 const upd = getUpdateInfo();
 if (upd.hasUpdate) {
   out.push(
@@ -814,16 +728,14 @@ if (upd.hasUpdate) {
   );
 }
 out.push("🔄 지금 새로고침 | refresh=true");
-// ccusage가 있을 때만(선택 의존) 대시보드 바로가기 노출
 if (claude && !claude.error) {
   out.push(
     `📊 ccusage 대시보드 열기 | bash="${CCUSAGE}" param1=blocks param2=--active terminal=true`,
   );
 }
 out.push(
-  `v${VERSION}  ·  Claude & Codex Usage Battery | size=11 color=#8b949e`,
+  `v${VERSION}  ·  Claude & Cursor Usage Battery | size=11 color=#8b949e`,
 );
-// 크기 전환 — .batt-size 파일에 반대 프리셋을 기록하고 즉시 새로고침
 {
   const other = SIZE === "big" ? "small" : "big";
   out.push(
@@ -831,11 +743,10 @@ out.push(
   );
 }
 out.push(
-  `⭐ github.com/dennykim123/claude-codex-battery | href=https://github.com/dennykim123/claude-codex-battery size=11 color=#8b949e`,
+  `⭐ github.com/HDomi/ai-usage-battery | href=https://github.com/HDomi/ai-usage-battery size=11 color=#8b949e`,
 );
-// 위젯 끄기 — SwiftBar의 플러그인 비활성화 URL. 재활성화: SwiftBar 메뉴 → Plugins
 out.push(
-  `✕ 위젯 끄기 (SwiftBar 설정에서 재활성화) | href=swiftbar://disableplugin?plugin=claude-codex-usage size=11 color=#8b949e`,
+  `✕ 위젯 끄기 (SwiftBar 설정에서 재활성화) | href=swiftbar://disableplugin?plugin=claude-cursor-usage size=11 color=#8b949e`,
 );
 
 console.log(out.join("\n"));

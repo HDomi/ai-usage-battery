@@ -2,17 +2,16 @@
 # Claude & Codex Usage Battery — self-update
 # 위젯 드롭다운의 "🆕 업데이트"에서 호출됨. 최신 스크립트를 내려받아 제자리 교체.
 set -e
-RAW="https://raw.githubusercontent.com/dennykim123/claude-codex-battery/main"
+RAW="https://raw.githubusercontent.com/HDomi/ai-usage-battery/main"
 DEST_DIR="$(cd "$(dirname "$0")" && pwd)"
-DEST="$DEST_DIR/claude-codex-usage.2m.js"
-BUN="$(command -v bun || echo "$HOME/.bun/bin/bun")"
+DEST="$DEST_DIR/claude-cursor-usage.2m.js"
+BUN="$(command -v node || command -v bun || echo "$HOME/.nvm/versions/node/v24.16.0/bin/node")"
 TMP="$(mktemp)"
 
 echo "최신 버전을 내려받는 중..."
-curl -fsSL --max-time 20 "$RAW/claude-codex-usage.2m.js" -o "$TMP"
+curl -fsSL --max-time 20 "$RAW/claude-cursor-usage.2m.js" -o "$TMP" || curl -fsSL --max-time 20 "$RAW/claude-codex-usage.2m.js" -o "$TMP"
 
-# 무결성 최소 검증 — 제대로 받았는지 (shebang + 핵심 함수 존재)
-if ! head -1 "$TMP" | grep -q "bun" || ! grep -q "renderBatteryImage" "$TMP"; then
+if ! grep -q "renderBatteryImage" "$TMP"; then
   echo "❌ 다운로드 검증 실패 — 업데이트를 중단합니다."
   rm -f "$TMP"
   exit 1
