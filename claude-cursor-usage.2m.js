@@ -39,8 +39,69 @@ function findBin(name, extra = []) {
   } catch {}
   return name;
 }
-const CCUSAGE = findBin("ccusage");
+function findCCUsage() {
+  const bin = findBin("ccusage");
+  try {
+    if (bin && bin !== "ccusage" && existsSync(bin)) return bin;
+    execSync(`${bin} --version 2>/dev/null`, { stdio: "ignore" });
+    return bin;
+  } catch {}
+  const npx = findBin("npx");
+  if (npx && existsSync(npx)) return `"${npx}" -y ccusage`;
+  return "npx -y ccusage";
+}
+const CCUSAGE = findCCUsage();
 const now = Math.floor(Date.now() / 1000);
+
+const EXCHANGE_CACHE = `${HOME}/.claude/swiftbar/.exchange-rate.json`;
+const DEFAULT_KRW_RATE = 1400;
+
+function getExchangeRateKRW() {
+  if (process.env.EXCHANGE_RATE_KRW) {
+    return Number(process.env.EXCHANGE_RATE_KRW);
+  }
+  let cache = null;
+  try {
+    cache = JSON.parse(readFileSync(EXCHANGE_CACHE, "utf8"));
+  } catch {}
+
+  const age = cache?.fetchedAt ? now - cache.fetchedAt : Infinity;
+
+  if (!cache?.rate || age > 6 * 3600) {
+    try {
+      const raw = execSync(
+        `curl -fsL --max-time 3 "https://open.er-api.com/v6/latest/USD" 2>/dev/null`,
+        {
+          encoding: "utf8",
+          timeout: 4000,
+          stdio: ["ignore", "pipe", "ignore"],
+        },
+      );
+      const data = JSON.parse(raw);
+      if (data?.rates?.KRW) {
+        const rate = Math.round(data.rates.KRW * 10) / 10;
+        try {
+          mkdirSync(dirname(EXCHANGE_CACHE), { recursive: true });
+          writeFileSync(
+            EXCHANGE_CACHE,
+            JSON.stringify({ fetchedAt: now, rate }),
+          );
+        } catch {}
+        return rate;
+      }
+    } catch {}
+  }
+
+  return cache?.rate || DEFAULT_KRW_RATE;
+}
+
+const EXCHANGE_RATE_KRW = getExchangeRateKRW();
+
+function fmtKRW(usd) {
+  if (usd == null || isNaN(usd)) return "?원";
+  const krw = Math.round(usd * EXCHANGE_RATE_KRW);
+  return `₩${krw.toLocaleString()}`;
+}
 
 // ── 자동 업데이트 ──
 const VERSION = "2.0.0";
@@ -567,6 +628,7 @@ function fetchCursorUsageLive() {
       remainPct: remainPct,
       cycleEnd: d.billingCycleEnd ? Math.floor(Number(d.billingCycleEnd) / 1000) : null,
       displayMsg: d.autoModelSelectedDisplayMessage || d.displayMessage || null,
+      totalSpendCents: d.planUsage.totalSpend ?? null,
       measuredAt: Math.floor(Date.now() / 1000),
       live: true
     };
@@ -665,21 +727,28 @@ if (hasClaude) {
   }
   if (claude && !claude.error) {
     out.push(
-      `블록 비용  $${claude.cost.toFixed(2)}  ·  ${fmtTok(claude.tokens)} 토큰  ·  $${claude.costPerHour?.toFixed(1) ?? "?"}/h | font=Menlo size=11 color=#8b949e`,
+      `블록 비용  $${claude.cost.toFixed(2)} (${fmtKRW(claude.cost)})  ·  ${fmtTok(claude.tokens)} 토큰  ·  $${claude.costPerHour?.toFixed(1) ?? "?"}/h | font=Menlo size=11 color=#8b949e`,
     );
   }
   if (cmodels && cmodels.models.length) {
     out.push(
-      `오늘 모델별  ·  합 $${cmodels.total.toFixed(0)} | size=11 color=#8b949e`,
+      `오늘 모델별  ·  합 $${cmodels.total.toFixed(0)} (${fmtKRW(cmodels.total)}) | size=11 color=#8b949e`,
     );
     const maxCost = cmodels.models[0].cost || 1;
     for (const m of cmodels.models) {
       const g = bar((m.cost / maxCost) * 100, 12);
       const label = shortModel(m.name).padEnd(9, " ");
       out.push(
-        `${label}▕${g}▏ $${m.cost.toFixed(1)}  ${fmtTok(m.tokens)} | font=Menlo`,
+        `${label}▕${g}▏ $${m.cost.toFixed(1)} (${fmtKRW(m.cost)})  ${fmtTok(m.tokens)} | font=Menlo`,
       );
     }
+  }
+  const claudeUsd = (cmodels?.total || (claude && !claude.error ? claude.cost : 0) || 0);
+  if (claudeUsd > 0) {
+    const claudeKrw = Math.round(claudeUsd * EXCHANGE_RATE_KRW);
+    out.push(
+      `💳 지금까지 Claude 약 ${claudeKrw.toLocaleString()}원($${claudeUsd.toFixed(2)})을 사용하셨습니다! | font=Menlo size=12 color=#30D158`,
+    );
   }
   out.push("---");
 }
@@ -707,6 +776,15 @@ if (hasCursor) {
       ? `라이브 (Cursor API) | size=11 color=#8b949e`
       : `측정 ${fmtDur(now - cursorUsage.measuredAt)} 전 (캐시 폴백) | size=11 color=#d29922`,
   );
+  const cursorUsd = cursorUsage?.totalSpendCents
+    ? (cursorUsage.totalSpendCents / 100)
+    : (cursorUsage?.usedPct != null ? (cursorUsage.usedPct / 100) * 20 : 0);
+  if (cursorUsd > 0) {
+    const cursorKrw = Math.round(cursorUsd * EXCHANGE_RATE_KRW);
+    out.push(
+      `💳 지금까지 Cursor 약 ${cursorKrw.toLocaleString()}원($${cursorUsd.toFixed(2)})을 사용하셨습니다! | font=Menlo size=12 color=#30D158`,
+    );
+  }
   out.push("---");
 }
 
