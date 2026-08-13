@@ -163,12 +163,20 @@ function fmtKRW(usd) {
 }
 
 // ── 자동 업데이트 ──
-const VERSION = "2.1.1";
+const VERSION = "2.1.2";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/HDomi/ai-usage-battery/main";
+const REPO_API_SHA =
+  "https://api.github.com/repos/HDomi/ai-usage-battery/commits/main";
 const UPDATE_CACHE = `${HOME}/.claude/swiftbar/.update-check.json`;
 
+/**
+ * 버전 문자열을 비교한다.
+ * @param {string} a
+ * @param {string} b
+ * @returns {number} a>b이면 1, a<b이면 -1, 같으면 0
+ */
 function cmpVer(a, b) {
   const pa = String(a).split(".").map(Number);
   const pb = String(b).split(".").map(Number);
@@ -179,16 +187,27 @@ function cmpVer(a, b) {
   return 0;
 }
 
+/**
+ * GitHub VERSION 을 조회해 업데이트 가능 여부를 반환한다.
+ * raw CDN(max-age=300) 회피를 위해 commits SHA 로 VERSION 을 핀한다.
+ * @returns {{ latest: string|undefined, hasUpdate: boolean }}
+ */
 function getUpdateInfo() {
   let cache = null;
   try {
     cache = JSON.parse(readFileSync(UPDATE_CACHE, "utf8"));
   } catch {}
   const age = cache?.checkedAt ? now - cache.checkedAt : Infinity;
-  if (age > 24 * 3600) {
+  // 새 버전이 보이면 바로 배너 뜨도록 1시간마다 재확인
+  if (age > 3600) {
     try {
       const cmd =
-        `latest=$(curl -fsL --max-time 8 "${REPO_RAW}/VERSION" 2>/dev/null | tr -d '[:space:]'); ` +
+        `sha=$(curl -fsSL --max-time 8 -H "Accept: application/vnd.github.VERSION.sha" -H "Cache-Control: no-cache" "${REPO_API_SHA}" | tr -d "[:space:]"); ` +
+        `latest=""; ` +
+        `if printf "%s" "$sha" | grep -Eq "^[a-f0-9]{40}$"; then ` +
+        `latest=$(curl -fsSL --max-time 8 -H "Cache-Control: no-cache" "https://raw.githubusercontent.com/HDomi/ai-usage-battery/$sha/VERSION" | tr -d "[:space:]"); ` +
+        `fi; ` +
+        `if [ -z "$latest" ]; then latest=$(curl -fsSL --max-time 8 "${REPO_RAW}/VERSION?t=${now}" | tr -d "[:space:]"); fi; ` +
         `[ -n "$latest" ] && printf '{"checkedAt":%s,"latest":"%s"}' "${now}" "$latest" > "${UPDATE_CACHE}"`;
       const child = spawn("/bin/sh", ["-c", cmd], {
         detached: true,
