@@ -12,17 +12,71 @@ import {
   statSync,
   existsSync,
   mkdirSync,
+  readdirSync,
 } from "node:fs";
 import { dirname } from "node:path";
 import { homedir } from "node:os";
 import zlib from "node:zlib";
 
 const HOME = homedir();
+
+// SwiftBar는 PATH가 거의 비어 있음 → shebang node 옆·nvm·Homebrew를 앞에 붙인다
+{
+  const pathExtras = [
+    dirname(process.execPath),
+    `${HOME}/.bun/bin`,
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+  ].filter((p) => {
+    try {
+      return existsSync(p);
+    } catch {
+      return false;
+    }
+  });
+  process.env.PATH = [...pathExtras, process.env.PATH || "/usr/bin:/bin"].join(
+    ":",
+  );
+}
+
+/**
+ * nvm에 설치된 node 버전 bin 경로를 최신순으로 반환한다.
+ * @param {string} name - 실행 파일명
+ * @returns {string[]}
+ */
+function nvmBinCandidates(name) {
+  const root = `${HOME}/.nvm/versions/node`;
+  try {
+    return readdirSync(root)
+      .filter((v) => /^v\d/.test(v))
+      .sort((a, b) => {
+        const pa = a.slice(1).split(".").map(Number);
+        const pb = b.slice(1).split(".").map(Number);
+        for (let i = 0; i < 3; i++) {
+          const d = (pb[i] || 0) - (pa[i] || 0);
+          if (d) return d;
+        }
+        return 0;
+      })
+      .map((v) => `${root}/${v}/bin/${name}`);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * PATH에 의존하지 않고 실행 파일 절대경로를 찾는다.
+ * @param {string} name - 실행 파일명
+ * @param {string[]} [extra] - 우선 탐색 경로
+ * @returns {string}
+ */
 function findBin(name, extra = []) {
   const cands = [
     ...extra,
+    `${dirname(process.execPath)}/${name}`,
     `${HOME}/.bun/bin/${name}`,
     `${HOME}/.nvm/versions/node/current/bin/${name}`,
+    ...nvmBinCandidates(name),
     "/opt/homebrew/bin/" + name,
     "/usr/local/bin/" + name,
   ];
@@ -39,6 +93,11 @@ function findBin(name, extra = []) {
   } catch {}
   return name;
 }
+
+/**
+ * ccusage 실행 커맨드를 결정한다. (없으면 npx로 실행)
+ * @returns {string}
+ */
 function findCCUsage() {
   const bin = findBin("ccusage");
   try {
@@ -104,7 +163,7 @@ function fmtKRW(usd) {
 }
 
 // ── 자동 업데이트 ──
-const VERSION = "2.0.0";
+const VERSION = "2.1.0";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/HDomi/ai-usage-battery/main";
@@ -459,6 +518,7 @@ function getClaude() {
 
 const MODEL_NAMES = {
   "claude-fable-5": "Fable 5",
+  "claude-opus-5": "Opus 5",
   "claude-opus-4-8": "Opus 4.8",
   "claude-opus-4-7": "Opus 4.7",
   "claude-sonnet-5": "Sonnet 5",
@@ -602,35 +662,68 @@ function getClaudeUsage() {
 // ── 2. Cursor AI 사용량 ─────────────────────────────
 const CURSOR_USAGE_CACHE = `${CLAUDE_STATE_DIR}/.cursor-usage.json`;
 
+/**
+ * Cursor planUsage에서 실제 포함된 사용률(%)을 계산한다.
+ * totalPercentUsed는 동결·내부지표로 어긋날 수 있어 spend/limit·displayMessage를 우선한다.
+ * @param {object} d - GetCurrentPeriodUsage 응답
+ * @returns {number}
+ */
+function resolveCursorUsedPct(d) {
+  const pu = d?.planUsage || {};
+  const limit = Number(pu.limit);
+  const spent = Number(pu.includedSpend ?? pu.totalSpend);
+  if (Number.isFinite(limit) && limit > 0 && Number.isFinite(spent)) {
+    return Math.min(100, Math.max(0, (spent / limit) * 100));
+  }
+  const msg = d?.displayMessage || d?.autoModelSelectedDisplayMessage || "";
+  const m = String(msg).match(/(\d+(?:\.\d+)?)\s*%/);
+  if (m) return Math.min(100, Math.max(0, Number(m[1])));
+  return Number(pu.totalPercentUsed ?? pu.autoPercentUsed ?? 0) || 0;
+}
+
+/**
+ * Cursor 라이브 사용량을 조회한다.
+ * @returns {object|null}
+ */
 function fetchCursorUsageLive() {
   try {
     const dbPath = `${HOME}/Library/Application Support/Cursor/User/globalStorage/state.vscdb`;
     if (!existsSync(dbPath)) return null;
 
     const token = execSync(
-      `/usr/bin/sqlite3 "${dbPath}" "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken';"`
-    , { encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+      `/usr/bin/sqlite3 "${dbPath}" "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken';"`,
+      { encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
 
     if (!token) return null;
 
     const raw = execSync(
-      `/usr/bin/curl -sL -X POST -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -H "Connect-Protocol-Version: 1" -d "{}" https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage`
-    , { encoding: "utf8", timeout: 8000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+      `/usr/bin/curl -sL -X POST -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -H "Connect-Protocol-Version: 1" -d "{}" https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage`,
+      { encoding: "utf8", timeout: 8000, stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
 
     const d = JSON.parse(raw);
     if (!d?.planUsage) return null;
 
-    const usedPct = Number(d.planUsage.totalPercentUsed ?? d.planUsage.autoPercentUsed ?? 0);
+    const pu = d.planUsage;
+    const usedPct = resolveCursorUsedPct(d);
     const remainPct = Math.max(0, 100 - usedPct);
 
     const res = {
-      usedPct: usedPct,
-      remainPct: remainPct,
-      cycleEnd: d.billingCycleEnd ? Math.floor(Number(d.billingCycleEnd) / 1000) : null,
-      displayMsg: d.autoModelSelectedDisplayMessage || d.displayMessage || null,
-      totalSpendCents: d.planUsage.totalSpend ?? null,
+      usedPct,
+      remainPct,
+      cycleEnd: d.billingCycleEnd
+        ? Math.floor(Number(d.billingCycleEnd) / 1000)
+        : null,
+      // displayMessage가 includedSpend/limit 기준(대시보드와 동일)
+      displayMsg: d.displayMessage || d.autoModelSelectedDisplayMessage || null,
+      totalSpendCents: pu.totalSpend ?? null,
+      includedSpendCents: pu.includedSpend ?? null,
+      limitCents: pu.limit ?? null,
+      autoPercentUsed: pu.autoPercentUsed ?? null,
+      apiPercentUsed: pu.apiPercentUsed ?? null,
       measuredAt: Math.floor(Date.now() / 1000),
-      live: true
+      live: true,
     };
 
     try {
@@ -766,6 +859,17 @@ if (hasCursor) {
   out.push(
     `월간 남음  ▕${bar(r, 20)}▏ ${r}%  (사용 ${u}%)${resetStr ? "  ·  " + resetStr : ""} | font=Menlo color=${heatRemainHex(r)}`,
   );
+  if (
+    cursorUsage.includedSpendCents != null &&
+    cursorUsage.limitCents != null &&
+    cursorUsage.limitCents > 0
+  ) {
+    const usedUsd = (cursorUsage.includedSpendCents / 100).toFixed(2);
+    const limUsd = (cursorUsage.limitCents / 100).toFixed(2);
+    out.push(
+      `      included $${usedUsd} / $${limUsd} | font=Menlo size=11 color=#8b949e`,
+    );
+  }
   if (cursorUsage.displayMsg) {
     out.push(
       `      ${cursorUsage.displayMsg} | font=Menlo size=11 color=#8b949e`,
