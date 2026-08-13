@@ -163,7 +163,7 @@ function fmtKRW(usd) {
 }
 
 // ── 자동 업데이트 ──
-const VERSION = "2.1.3";
+const VERSION = "2.1.4";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/HDomi/ai-usage-battery/main";
@@ -202,12 +202,12 @@ function getUpdateInfo() {
   if (age > 3600) {
     try {
       const cmd =
-        `sha=$(curl -fsSL --max-time 8 -H "Accept: application/vnd.github.VERSION.sha" -H "Cache-Control: no-cache" "${REPO_API_SHA}" | tr -d "[:space:]"); ` +
+        `sha=$(curl -fsSL --max-time 8 -A "ai-usage-battery-updater" -H "Accept: application/vnd.github.VERSION.sha" -H "Cache-Control: no-cache" "${REPO_API_SHA}" 2>/dev/null | tr -d "[:space:]"); ` +
         `latest=""; ` +
         `if printf "%s" "$sha" | grep -Eq "^[a-f0-9]{40}$"; then ` +
-        `latest=$(curl -fsSL --max-time 8 -H "Cache-Control: no-cache" "https://raw.githubusercontent.com/HDomi/ai-usage-battery/$sha/VERSION" | tr -d "[:space:]"); ` +
+        `latest=$(curl -fsSL --max-time 8 -A "ai-usage-battery-updater" -H "Cache-Control: no-cache" "https://raw.githubusercontent.com/HDomi/ai-usage-battery/$sha/VERSION" | tr -d "[:space:]"); ` +
         `fi; ` +
-        `if [ -z "$latest" ]; then latest=$(curl -fsSL --max-time 8 "${REPO_RAW}/VERSION?t=${now}" | tr -d "[:space:]"); fi; ` +
+        `if [ -z "$latest" ]; then latest=$(curl -fsSL --max-time 8 -A "ai-usage-battery-updater" -H "Cache-Control: no-cache" "${REPO_RAW}/VERSION?t=${now}" | tr -d "[:space:]"); fi; ` +
         `[ -n "$latest" ] && printf '{"checkedAt":%s,"latest":"%s"}' "${now}" "$latest" > "${UPDATE_CACHE}"`;
       const child = spawn("/bin/sh", ["-c", cmd], {
         detached: true,
@@ -229,17 +229,21 @@ function ensureUpdater() {
   try {
     if (
       existsSync(dest) &&
-      readFileSync(dest, "utf8").includes("application/vnd.github.VERSION.sha")
+      /ai-usage-battery-updater|vnd\.github\.VERSION\.sha/.test(
+        readFileSync(dest, "utf8"),
+      )
     ) {
       return;
     }
   } catch {}
   try {
     const cmd =
-      `sha=$(curl -fsSL --max-time 8 -H "Accept: application/vnd.github.VERSION.sha" -H "Cache-Control: no-cache" "${REPO_API_SHA}" | tr -d "[:space:]"); ` +
-      `if ! printf "%s" "$sha" | grep -Eq "^[a-f0-9]{40}$"; then exit 0; fi; ` +
-      `curl -fsSL --max-time 15 -H "Cache-Control: no-cache" "https://raw.githubusercontent.com/HDomi/ai-usage-battery/$sha/ccb-update.sh" -o "${dest}.tmp" && ` +
-      `grep -q "application/vnd.github.VERSION.sha" "${dest}.tmp" && ` +
+      `sha=$(curl -fsSL --max-time 8 -A "ai-usage-battery-updater" -H "Accept: application/vnd.github.VERSION.sha" -H "Cache-Control: no-cache" "${REPO_API_SHA}" 2>/dev/null | tr -d "[:space:]"); ` +
+      `url=""; ` +
+      `if printf "%s" "$sha" | grep -Eq "^[a-f0-9]{40}$"; then url="https://raw.githubusercontent.com/HDomi/ai-usage-battery/$sha/ccb-update.sh"; ` +
+      `else url="https://raw.githubusercontent.com/HDomi/ai-usage-battery/main/ccb-update.sh?t=${now}"; fi; ` +
+      `curl -fsSL --max-time 15 -A "ai-usage-battery-updater" -H "Cache-Control: no-cache" "$url" -o "${dest}.tmp" && ` +
+      `grep -qE "ai-usage-battery-updater|vnd.github.VERSION.sha" "${dest}.tmp" && ` +
       `mv "${dest}.tmp" "${dest}" && chmod +x "${dest}"`;
     const child = spawn("/bin/sh", ["-c", cmd], {
       detached: true,
