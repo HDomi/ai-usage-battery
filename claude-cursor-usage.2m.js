@@ -163,7 +163,7 @@ function fmtKRW(usd) {
 }
 
 // ── 자동 업데이트 ──
-const VERSION = "2.1.0";
+const VERSION = "2.1.1";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/HDomi/ai-usage-battery/main";
@@ -663,22 +663,47 @@ function getClaudeUsage() {
 const CURSOR_USAGE_CACHE = `${CLAUDE_STATE_DIR}/.cursor-usage.json`;
 
 /**
- * Cursor planUsage에서 실제 포함된 사용률(%)을 계산한다.
- * totalPercentUsed는 동결·내부지표로 어긋날 수 있어 spend/limit·displayMessage를 우선한다.
- * @param {object} d - GetCurrentPeriodUsage 응답
- * @returns {number}
+ * 0~100 범위의 사용률 숫자로 정규화한다.
+ * @param {unknown} v
+ * @returns {number|null}
  */
-function resolveCursorUsedPct(d) {
+function clampPct(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(100, Math.max(0, n));
+}
+
+/**
+ * Cursor 대시보드의 Cursor Models / Other Models 사용률을 추출한다.
+ * autoPercentUsed=Cursor Models, apiPercentUsed=Other Models.
+ * includedSpend/limit는 별도 $ 풀이라 % 바와 다를 수 있어 메인 지표로 쓰지 않는다.
+ * @param {object} d - GetCurrentPeriodUsage 응답
+ * @returns {{ autoUsed: number, apiUsed: number, usedPct: number }}
+ */
+function resolveCursorPoolPct(d) {
   const pu = d?.planUsage || {};
-  const limit = Number(pu.limit);
-  const spent = Number(pu.includedSpend ?? pu.totalSpend);
-  if (Number.isFinite(limit) && limit > 0 && Number.isFinite(spent)) {
-    return Math.min(100, Math.max(0, (spent / limit) * 100));
-  }
-  const msg = d?.displayMessage || d?.autoModelSelectedDisplayMessage || "";
-  const m = String(msg).match(/(\d+(?:\.\d+)?)\s*%/);
-  if (m) return Math.min(100, Math.max(0, Number(m[1])));
-  return Number(pu.totalPercentUsed ?? pu.autoPercentUsed ?? 0) || 0;
+  const autoUsed =
+    clampPct(pu.autoPercentUsed) ??
+    clampPct(
+      String(d?.autoModelSelectedDisplayMessage || "").match(
+        /(\d+(?:\.\d+)?)\s*%/,
+      )?.[1],
+    ) ??
+    0;
+  const apiUsed =
+    clampPct(pu.apiPercentUsed) ??
+    clampPct(
+      String(d?.namedModelSelectedDisplayMessage || "").match(
+        /(\d+(?:\.\d+)?)\s*%/,
+      )?.[1],
+    ) ??
+    0;
+  // 메뉴바 대표값은 Cursor Models(auto). 둘 다 없으면 totalPercentUsed 폴백
+  const usedPct =
+    clampPct(pu.autoPercentUsed) != null
+      ? autoUsed
+      : (clampPct(pu.totalPercentUsed) ?? autoUsed);
+  return { autoUsed, apiUsed, usedPct };
 }
 
 /**
@@ -706,22 +731,25 @@ function fetchCursorUsageLive() {
     if (!d?.planUsage) return null;
 
     const pu = d.planUsage;
-    const usedPct = resolveCursorUsedPct(d);
+    const { autoUsed, apiUsed, usedPct } = resolveCursorPoolPct(d);
     const remainPct = Math.max(0, 100 - usedPct);
 
     const res = {
       usedPct,
       remainPct,
+      autoPercentUsed: autoUsed,
+      apiPercentUsed: apiUsed,
       cycleEnd: d.billingCycleEnd
         ? Math.floor(Number(d.billingCycleEnd) / 1000)
         : null,
-      // displayMessage가 includedSpend/limit 기준(대시보드와 동일)
-      displayMsg: d.displayMessage || d.autoModelSelectedDisplayMessage || null,
+      displayMsg:
+        d.autoModelSelectedDisplayMessage ||
+        d.displayMessage ||
+        d.namedModelSelectedDisplayMessage ||
+        null,
       totalSpendCents: pu.totalSpend ?? null,
       includedSpendCents: pu.includedSpend ?? null,
       limitCents: pu.limit ?? null,
-      autoPercentUsed: pu.autoPercentUsed ?? null,
-      apiPercentUsed: pu.apiPercentUsed ?? null,
       measuredAt: Math.floor(Date.now() / 1000),
       live: true,
     };
@@ -773,7 +801,12 @@ if (cusage) {
 }
 
 if (cursorUsage) {
-  battItems.push({ label: "Cr", remain: Math.round(cursorUsage.remainPct) });
+  const autoUsed = cursorUsage.autoPercentUsed ?? cursorUsage.usedPct ?? 0;
+  const apiUsed = cursorUsage.apiPercentUsed;
+  battItems.push({ label: "Cr", remain: Math.round(rem(autoUsed)) });
+  if (apiUsed != null) {
+    battItems.push({ label: "Co", remain: Math.round(rem(apiUsed)) });
+  }
 }
 
 if (battItems.length) {
@@ -785,7 +818,7 @@ out.push("---");
 
 const legendParts = [];
 if (hasClaude) legendParts.push("C5·CW·CF = Claude");
-if (hasCursor) legendParts.push("Cr = Cursor");
+if (hasCursor) legendParts.push("Cr = Cursor Models  ·  Co = Other Models");
 if (legendParts.length) {
   out.push(
     `🔋 남은 %  ·  ${legendParts.join("  ·  ")} | size=11 color=#8b949e`,
@@ -849,27 +882,23 @@ if (hasClaude) {
 // Cursor 상세
 if (hasCursor) {
   out.push("Cursor AI | size=13 color=#8b949e");
-  const r = Math.round(cursorUsage.remainPct);
-  const u = Math.round(cursorUsage.usedPct);
   const resetStr = cursorUsage.cycleEnd
     ? cursorUsage.cycleEnd < now
       ? "리셋됨"
       : `리셋 ${fmtDur(cursorUsage.cycleEnd - now)}`
     : "";
-  out.push(
-    `월간 남음  ▕${bar(r, 20)}▏ ${r}%  (사용 ${u}%)${resetStr ? "  ·  " + resetStr : ""} | font=Menlo color=${heatRemainHex(r)}`,
-  );
-  if (
-    cursorUsage.includedSpendCents != null &&
-    cursorUsage.limitCents != null &&
-    cursorUsage.limitCents > 0
-  ) {
-    const usedUsd = (cursorUsage.includedSpendCents / 100).toFixed(2);
-    const limUsd = (cursorUsage.limitCents / 100).toFixed(2);
+  const poolRow = (label, used) => {
+    if (used == null) return;
+    const u = Math.round(used);
+    const r = Math.max(0, 100 - u);
     out.push(
-      `      included $${usedUsd} / $${limUsd} | font=Menlo size=11 color=#8b949e`,
+      `${label} ▕${bar(r, 20)}▏ ${r}%  (사용 ${u}%)${resetStr ? "  ·  " + resetStr : ""} | font=Menlo color=${heatRemainHex(r)}`,
     );
-  }
+  };
+  const autoUsed = cursorUsage.autoPercentUsed ?? cursorUsage.usedPct;
+  const apiUsed = cursorUsage.apiPercentUsed;
+  poolRow("Cursor Models", autoUsed);
+  poolRow("Other Models ", apiUsed);
   if (cursorUsage.displayMsg) {
     out.push(
       `      ${cursorUsage.displayMsg} | font=Menlo size=11 color=#8b949e`,
@@ -881,8 +910,8 @@ if (hasCursor) {
       : `측정 ${fmtDur(now - cursorUsage.measuredAt)} 전 (캐시 폴백) | size=11 color=#d29922`,
   );
   const cursorUsd = cursorUsage?.totalSpendCents
-    ? (cursorUsage.totalSpendCents / 100)
-    : (cursorUsage?.usedPct != null ? (cursorUsage.usedPct / 100) * 20 : 0);
+    ? cursorUsage.totalSpendCents / 100
+    : 0;
   if (cursorUsd > 0) {
     const cursorKrw = Math.round(cursorUsd * EXCHANGE_RATE_KRW);
     out.push(
