@@ -163,7 +163,7 @@ function fmtKRW(usd) {
 }
 
 // ── 자동 업데이트 ──
-const VERSION = "2.1.2";
+const VERSION = "2.1.3";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/HDomi/ai-usage-battery/main";
@@ -219,6 +219,36 @@ function getUpdateInfo() {
   const latest = cache?.latest;
   return { latest, hasUpdate: !!latest && cmpVer(latest, VERSION) > 0 };
 }
+
+/**
+ * CDN 우회 업데이터(.ccb-update.sh)가 없으면 GitHub SHA 기준으로 받아 둔다.
+ * 구버전 업데이터만 있을 때 한 번 교체하면 이후 SwiftBar 업데이트가 막히지 않는다.
+ */
+function ensureUpdater() {
+  const dest = `${SELF_DIR}/.ccb-update.sh`;
+  try {
+    if (
+      existsSync(dest) &&
+      readFileSync(dest, "utf8").includes("application/vnd.github.VERSION.sha")
+    ) {
+      return;
+    }
+  } catch {}
+  try {
+    const cmd =
+      `sha=$(curl -fsSL --max-time 8 -H "Accept: application/vnd.github.VERSION.sha" -H "Cache-Control: no-cache" "${REPO_API_SHA}" | tr -d "[:space:]"); ` +
+      `if ! printf "%s" "$sha" | grep -Eq "^[a-f0-9]{40}$"; then exit 0; fi; ` +
+      `curl -fsSL --max-time 15 -H "Cache-Control: no-cache" "https://raw.githubusercontent.com/HDomi/ai-usage-battery/$sha/ccb-update.sh" -o "${dest}.tmp" && ` +
+      `grep -q "application/vnd.github.VERSION.sha" "${dest}.tmp" && ` +
+      `mv "${dest}.tmp" "${dest}" && chmod +x "${dest}"`;
+    const child = spawn("/bin/sh", ["-c", cmd], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+  } catch {}
+}
+ensureUpdater();
 
 // ══ 배터리 아이콘 PNG 렌더 (순수 JS, node:zlib만) ══════════
 const CRC = (() => {
