@@ -1,9 +1,9 @@
 #!/bin/bash
-# Claude & Cursor 사용량 배터리 위젯 — 설치 스크립트
+# Claude · Cursor · Codex 사용량 배터리 위젯 — 설치 스크립트
 set -e
 cd "$(dirname "$0")"
 
-echo "🔋 Claude & Cursor Usage Battery — 설치"
+echo "🔋 Claude · Cursor · Codex Usage Battery — 설치"
 echo "────────────────────────────────────"
 
 # 1) JS 실행 환경 탐지 (node 또는 bun)
@@ -48,7 +48,14 @@ else
   echo "ⓘ  Cursor 세션 DB를 찾을 수 없습니다. Cursor에 로그인하여 실행하면 세션이 생성됩니다."
 fi
 
-# 5) 플러그인 배치
+# 5) Codex auth 확인
+if [ -f "$HOME/.codex/auth.json" ]; then
+  echo "✅ Codex 로그인(auth.json) 감지됨"
+else
+  echo "ⓘ  ~/.codex/auth.json 없음 — Codex 로그인 후 X 배터리가 표시됩니다."
+fi
+
+# 6) 플러그인 배치
 PLUGIN_DIR="${SWIFTBAR_PLUGIN_DIR:-$HOME/.swiftbar-plugins}"
 mkdir -p "$PLUGIN_DIR"
 rm -f "$PLUGIN_DIR/claude-codex-usage.2m.js" 2>/dev/null || true
@@ -59,7 +66,7 @@ cp ccb-update.sh "$PLUGIN_DIR/.ccb-update.sh" 2>/dev/null || true
 chmod +x "$PLUGIN_DIR/.ccb-update.sh" 2>/dev/null || true
 echo "✅ 플러그인 배치 완료: $PLUGIN_DIR/claude-cursor-usage.2m.js"
 
-# 6) SwiftBar 재시작 (앱이 있는 경우)
+# 7) SwiftBar 재시작 (앱이 있는 경우)
 if [ -n "$SWIFTBAR_APP" ]; then
   BID=$(defaults read "$SWIFTBAR_APP/Contents/Info" CFBundleIdentifier 2>/dev/null || echo "com.ameba.SwiftBar")
   defaults write "$BID" PluginDirectory -string "$PLUGIN_DIR"
@@ -85,5 +92,5 @@ if [ -z "$SWIFTBAR_APP" ]; then
   echo "👉 SwiftBar를 설치해 주세요: brew install --cask swiftbar"
   echo "   설치 후 SwiftBar를 실행하고 플러그인 폴더로 ~/.swiftbar-plugins 선택"
 else
-  echo "✅ SwiftBar 메뉴바 상단에 Claude & Cursor 배터리가 표시됩니다."
+  echo "✅ SwiftBar 메뉴바 상단에 Claude · Cursor · Codex 배터리가 표시됩니다."
 fi

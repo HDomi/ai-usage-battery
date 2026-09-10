@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// <xbar.title>Claude & Cursor Usage</xbar.title>
-// <xbar.version>v4.0</xbar.version>
+// <xbar.title>Claude · Cursor · Codex Usage</xbar.title>
+// <xbar.version>v4.1</xbar.version>
 // <xbar.author>개발부스러기</xbar.author>
-// <xbar.desc>Claude Code 5시간 블록 + Cursor 사용량을 메뉴바에 배터리 아이콘으로 상시 표시</xbar.desc>
+// <xbar.desc>Claude Code · Cursor · Codex 사용량을 메뉴바에 배터리 아이콘으로 상시 표시</xbar.desc>
 // SwiftBar 플러그인: 2분마다 갱신. 메뉴바=배터리 잔량 아이콘(자체 PNG), 클릭=상세 게이지.
 
 import { execSync, spawn } from "node:child_process";
@@ -163,7 +163,7 @@ function fmtKRW(usd) {
 }
 
 // ── 자동 업데이트 ──
-const VERSION = "2.1.4";
+const VERSION = "2.2.1";
 const SELF_DIR = dirname(process.argv[1] || `${HOME}/.swiftbar-plugins/x`);
 const REPO_RAW =
   "https://raw.githubusercontent.com/HDomi/ai-usage-battery/main";
@@ -361,6 +361,8 @@ const FONT46 = {
   C: ["0110", "1001", "1000", "1000", "1001", "0110"],
   R: ["1110", "1001", "1110", "1010", "1001", "1001"],
   r: ["0000", "1011", "1100", "1000", "1000", "1000"],
+  o: ["0000", "0110", "1001", "1001", "1001", "0110"],
+  X: ["1001", "1001", "0110", "0110", "1001", "1001"],
 };
 
 const FONT35 = {
@@ -373,10 +375,12 @@ const FONT35 = {
   6: ["111", "100", "111", "101", "111"],
   7: ["111", "001", "001", "001", "001"],
   8: ["111", "101", "111", "101", "111"],
-  9: ["111", "101", "111", "001", "111"],
+  9: ["111", "001", "111", "001", "111"],
   C: ["111", "100", "100", "100", "111"],
   R: ["110", "101", "110", "101", "101"],
   r: ["000", "111", "100", "100", "100"],
+  o: ["000", "111", "101", "101", "111"],
+  X: ["101", "101", "010", "101", "101"],
 };
 
 const PRESET =
@@ -451,7 +455,8 @@ function renderBatteryImage(dark, items) {
     LBLGAP = PRESET.lblgap;
   const H = PRESET.H;
   const midY = Math.floor(H / 2);
-  const getGroup = (lbl) => (lbl.startsWith("Cr") ? "Cr" : lbl[0]);
+  const getGroup = (lbl) =>
+    lbl.startsWith("Cr") ? "Cr" : lbl.startsWith("Co") ? "Co" : lbl[0];
   let W = PAD * 2;
   let pg = null;
   for (let i = 0; i < items.length; i++) {
@@ -832,16 +837,153 @@ function getCursorUsage() {
   return fetchCursorUsageLive() ?? readCursorUsageFallback();
 }
 
+// ── 3. Codex (ChatGPT) 사용량 ─────────────────────────────
+const CODEX_USAGE_CACHE = `${CLAUDE_STATE_DIR}/.codex-usage.json`;
+const CODEX_AUTH = `${HOME}/.codex/auth.json`;
+
+/**
+ * Codex auth.json 에서 access/account 토큰을 읽는다.
+ * @returns {{ accessToken: string, accountId: string|null }|null}
+ */
+function readCodexAuth() {
+  try {
+    if (!existsSync(CODEX_AUTH)) return null;
+    const d = JSON.parse(readFileSync(CODEX_AUTH, "utf8"));
+    const accessToken = d?.tokens?.access_token || d?.access_token || null;
+    if (!accessToken) return null;
+    return {
+      accessToken,
+      accountId: d?.tokens?.account_id || d?.account_id || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Codex/wham usage 응답에서 5시간·주간 창을 정규화한다.
+ * @param {object} d
+ * @returns {{ fiveHour: {pct:number,resetsAt:number|null}|null, weekly: {pct:number,resetsAt:number|null}|null, planType: string|null, creditsBalance: string|null }}
+ */
+function normalizeCodexUsage(d) {
+  const winFrom = (o, pctKey, resetKey) => {
+    if (!o) return null;
+    const pct = clampPct(o[pctKey] ?? o.used_percent ?? o.usedPercent);
+    if (pct == null) return null;
+    let resetsAt = null;
+    const r = o[resetKey] ?? o.resets_at ?? o.resetsAt ?? o.reset_at;
+    if (typeof r === "number" && Number.isFinite(r)) {
+      resetsAt = r > 1e12 ? Math.floor(r / 1000) : Math.floor(r);
+    } else if (typeof r === "string") {
+      const t = Date.parse(r);
+      if (Number.isFinite(t)) resetsAt = Math.floor(t / 1000);
+    } else if (o.reset_after_seconds != null) {
+      resetsAt = now + Number(o.reset_after_seconds);
+    }
+    return { pct, resetsAt };
+  };
+
+  // shape A: /wham/usage
+  const rl = d?.rate_limit || d?.rateLimit;
+  if (rl?.primary_window || rl?.secondary_window) {
+    return {
+      fiveHour: winFrom(rl.primary_window, "used_percent"),
+      weekly: winFrom(rl.secondary_window, "used_percent"),
+      planType: d?.plan_type || d?.planType || rl?.plan_type || null,
+      creditsBalance:
+        d?.credits?.balance ?? rl?.credits?.balance ?? null,
+    };
+  }
+
+  // shape B: rateLimits.primary / secondary (codex status JSON)
+  const limits = d?.rateLimits || d?.rate_limits || d?.rateLimitsByLimitId?.codex;
+  if (limits?.primary || limits?.secondary) {
+    return {
+      fiveHour: winFrom(limits.primary, "usedPercent"),
+      weekly: winFrom(limits.secondary, "usedPercent"),
+      planType: limits.planType || d?.planType || null,
+      creditsBalance: limits?.credits?.balance ?? null,
+    };
+  }
+
+  return { fiveHour: null, weekly: null, planType: null, creditsBalance: null };
+}
+
+/**
+ * Codex 라이브 사용량을 조회한다.
+ * @returns {object|null}
+ */
+function fetchCodexUsageLive() {
+  const auth = readCodexAuth();
+  if (!auth) return null;
+  try {
+    const headers = [
+      `Authorization: Bearer ${auth.accessToken}`,
+      "User-Agent: ai-usage-battery",
+      "Accept: application/json",
+    ];
+    if (auth.accountId) headers.push(`ChatGPT-Account-Id: ${auth.accountId}`);
+
+    const raw = execSync(
+      `/usr/bin/curl -fsS --max-time 6 -H @- "https://chatgpt.com/backend-api/wham/usage"`,
+      {
+        encoding: "utf8",
+        timeout: 8000,
+        input: headers.join("\n") + "\n",
+        stdio: ["pipe", "pipe", "ignore"],
+      },
+    );
+    const d = JSON.parse(raw);
+    const norm = normalizeCodexUsage(d);
+    if (!norm.fiveHour && !norm.weekly) return null;
+
+    const res = {
+      ...norm,
+      measuredAt: Math.floor(Date.now() / 1000),
+      live: true,
+    };
+    try {
+      mkdirSync(CLAUDE_STATE_DIR, { recursive: true });
+      writeFileSync(CODEX_USAGE_CACHE, JSON.stringify(res));
+    } catch {}
+    return res;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Codex 사용량 캐시 폴백을 읽는다.
+ * @returns {object|null}
+ */
+function readCodexUsageFallback() {
+  try {
+    const c = JSON.parse(readFileSync(CODEX_USAGE_CACHE, "utf8"));
+    if (c?.fiveHour || c?.weekly) return { ...c, live: false };
+  } catch {}
+  return null;
+}
+
+/**
+ * Codex 사용량을 반환한다.
+ * @returns {object|null}
+ */
+function getCodexUsage() {
+  return fetchCodexUsageLive() ?? readCodexUsageFallback();
+}
+
 // ── 렌더링 ─────────────────────────────────────────────────
 const claude = getClaude();
 const cusage = getClaudeUsage();
 const cmodels = getClaudeModels();
 const cursorUsage = getCursorUsage();
+const codexUsage = getCodexUsage();
 
 const out = [];
 const rem = (pct) => (pct == null ? null : Math.max(0, 100 - pct));
 const hasClaude = !!cusage || !!(claude && !claude.error);
 const hasCursor = !!cursorUsage;
+const hasCodex = !!codexUsage;
 
 const battItems = [];
 if (cusage) {
@@ -862,6 +1004,19 @@ if (cursorUsage) {
   }
 }
 
+if (codexUsage) {
+  if (codexUsage.fiveHour)
+    battItems.push({
+      label: "X",
+      remain: Math.round(rem(codexUsage.fiveHour.pct)),
+    });
+  if (codexUsage.weekly)
+    battItems.push({
+      label: "XW",
+      remain: Math.round(rem(codexUsage.weekly.pct)),
+    });
+}
+
 if (battItems.length) {
   out.push(`| image=${renderBatteryImage(isDarkMode(), battItems)}`);
 } else {
@@ -872,6 +1027,7 @@ out.push("---");
 const legendParts = [];
 if (hasClaude) legendParts.push("C5·CW·CF = Claude");
 if (hasCursor) legendParts.push("Cr = Cursor Models  ·  Co = Other Models");
+if (hasCodex) legendParts.push("X·XW = Codex");
 if (legendParts.length) {
   out.push(
     `🔋 남은 %  ·  ${legendParts.join("  ·  ")} | size=11 color=#8b949e`,
@@ -974,9 +1130,39 @@ if (hasCursor) {
   out.push("---");
 }
 
-if (!hasClaude && !hasCursor) {
+// Codex 상세
+if (hasCodex) {
+  out.push("Codex (ChatGPT) | size=13 color=#8b949e");
+  const winRow = (label, w) => {
+    if (!w) return;
+    const r = Math.max(0, 100 - (w.pct ?? 0));
+    const reset = w.resetsAt
+      ? w.resetsAt < now
+        ? "리셋됨"
+        : `리셋 ${fmtDur(w.resetsAt - now)}`
+      : "";
+    out.push(
+      `${label} ▕${bar(r, 20)}▏ ${Math.round(r)}%  (사용 ${Math.round(w.pct ?? 0)}%)${reset ? "  ·  " + reset : ""} | font=Menlo color=${heatRemainHex(r)}`,
+    );
+  };
+  winRow("X  5시간 남음", codexUsage.fiveHour);
+  winRow("XW 주간 남음 ", codexUsage.weekly);
+  if (codexUsage.planType) {
+    out.push(
+      `      plan ${codexUsage.planType}${codexUsage.creditsBalance != null ? `  ·  credits ${codexUsage.creditsBalance}` : ""} | font=Menlo size=11 color=#8b949e`,
+    );
+  }
   out.push(
-    "Claude Code나 Cursor를 로그인하여 실행하면 사용량이 표시됩니다 | size=12 color=gray",
+    codexUsage.live
+      ? `라이브 (ChatGPT wham/usage) | size=11 color=#8b949e`
+      : `측정 ${fmtDur(now - codexUsage.measuredAt)} 전 (캐시 폴백) | size=11 color=#d29922`,
+  );
+  out.push("---");
+}
+
+if (!hasClaude && !hasCursor && !hasCodex) {
+  out.push(
+    "Claude Code / Cursor / Codex 로그인 후 사용량이 표시됩니다 | size=12 color=gray",
   );
   out.push("---");
 }
@@ -998,7 +1184,7 @@ if (claude && !claude.error) {
   );
 }
 out.push(
-  `v${VERSION}  ·  Claude & Cursor Usage Battery | size=11 color=#8b949e`,
+  `v${VERSION}  ·  Claude · Cursor · Codex Usage Battery | size=11 color=#8b949e`,
 );
 {
   const other = SIZE === "big" ? "small" : "big";
